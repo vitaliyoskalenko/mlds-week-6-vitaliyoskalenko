@@ -8,6 +8,18 @@ from tensorflow.keras.optimizers import Adam
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.datasets import fetch_california_housing
+from sklearn.neighbors import NearestNeighbors
+
+LOCATION_COLUMNS = ['Latitude', 'Longitude']
+N_NEIGHBORS = 10
+
+def add_neighbor_price(X, neighbors, neighbor_prices, exclude_self=False):
+    X = X.copy()
+    k = neighbors.n_neighbors - 1
+    idx = neighbors.kneighbors(X[LOCATION_COLUMNS], return_distance=False)
+    idx = idx[:, 1:] if exclude_self else idx[:, :k]
+    X['NeighborPrice'] = neighbor_prices[idx].mean(axis=1)
+    return X
 
 def load_data():
     """
@@ -42,12 +54,18 @@ def preprocess_data(df):
     X = X.fillna(X.median())
     
     # Split into training and testing sets
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     y_train = y_train.to_numpy()
     y_test = y_test.to_numpy()
     
+    neighbors = NearestNeighbors(n_neighbors=N_NEIGHBORS + 1).fit(X_train[LOCATION_COLUMNS])
+    X_train = add_neighbor_price(X_train, neighbors, y_train, exclude_self=True)
+    X_test = add_neighbor_price(X_test, neighbors, y_train)
+    
     # Standardize numerical features
     scaler = StandardScaler()
+    scaler.neighbors = neighbors
+    scaler.neighbor_prices = y_train
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
@@ -63,7 +81,7 @@ def build_model(input_shape):
     Returns:
     model (Sequential): Compiled neural network model.
     """
-    tf.random.set_seed(42)
+    tf.keras.utils.set_random_seed(42)
     model = Sequential([
         Input(shape=(input_shape,)),
         Dense(256, activation='relu'),
@@ -71,7 +89,7 @@ def build_model(input_shape):
         Dense(64, activation='relu'),
         Dense(1, activation='linear')
     ])
-    model.compile(optimizer=Adam(learning_rate=0.001), loss='mse', metrics=['mae'])
+    model.compile(optimizer=Adam(learning_rate=0.001, use_ema=True, ema_momentum=0.99), loss='mse', metrics=['mae'])
     return model
 
 def train_model(model, X_train, y_train, X_test, y_test, epochs=50, batch_size=32):
@@ -149,9 +167,11 @@ def predict_house_price(model, house_features, scaler):
     """
     # Convert input to a NumPy array and reshape for model
     features = np.array(house_features, dtype=np.float64).reshape(1, -1)
+    features = pd.DataFrame(features, columns=scaler.feature_names_in_[:features.shape[1]])
+    features = add_neighbor_price(features, scaler.neighbors, scaler.neighbor_prices)
 
     # Scale the input features using the same scaler used in training
-    features_scaled = scaler.transform(pd.DataFrame(features, columns=scaler.feature_names_in_))
+    features_scaled = scaler.transform(features)
 
     # Predict price
     predicted_price = float(model.predict(features_scaled, verbose=0)[0, 0])
